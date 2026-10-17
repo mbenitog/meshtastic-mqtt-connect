@@ -87,7 +87,7 @@ mqtt_broker = "mqtt.meshtastic.org"
 mqtt_port = 1883
 mqtt_username = "meshdev"
 mqtt_password = "large4cats"
-root_topic = "msh/US/2/e/"
+root_topic = "msh/EU_868/2/e/"
 channel = "LongFast"
 key = "AQ=="
 max_msg_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN
@@ -100,7 +100,8 @@ client_long_name = "MQTTastic"
 lat = ""
 lon = ""
 alt = ""
-client_hw_model = 255
+client_hw_model = 9
+role = 11
 node_info_interval_minutes = 15
 
 #################################
@@ -111,6 +112,14 @@ db_file_path = "mmc.db"
 presets_file_path = "presets.json"
 presets = {}
 reserved_ids = [1,2,3,4,4294967295]
+
+ROLE_MAP = {
+    "CLIENT": 0, "CLIENT_MUTE": 1, "ROUTER": 2, "ROUTER_CLIENT": 3,
+    "REPEATER": 4, "TRACKER": 5, "SENSOR": 6, "TAK": 7,
+    "CLIENT_HIDDEN": 8, "LOST_AND_FOUND": 9, "TAK_TRACKER": 10,
+    "ROUTER_LATE": 11, "CLIENT_BASE": 12
+}
+ROLE_NAMES = list(ROLE_MAP.keys())
 
 
 
@@ -123,6 +132,8 @@ def is_valid_hex(test_value: str, minchars: Optional[int], maxchars: int) -> boo
 
     if test_value.startswith('!'):
         test_value = test_value[1:]		#Ignore a leading exclamation point
+    if not test_value:
+        return False
     valid_hex_return: bool = all(c in string.hexdigits for c in test_value)
 
     decimal_value = int(test_value, 16)
@@ -143,7 +154,7 @@ def set_topic():
     if debug:
         print("set_topic")
     global subscribe_topic, publish_topic, node_number, node_name
-    node_name = '!' + hex(node_number)[2:]
+    node_name = '!' + format(node_number, '08x')
     subscribe_topic = root_topic + channel + "/#"
     publish_topic = root_topic + channel + "/" + node_name
 
@@ -253,7 +264,7 @@ def sanitize_string(input_str: str) -> str:
 class Preset:
     """Values needed to remember settings between runs."""
 
-    def __init__(self, name, broker, username, password, root_topic, channel, key, node_number, long_name, short_name, lat, lon, alt):
+    def __init__(self, name, broker, username, password, root_topic, channel, key, node_number, long_name, short_name, lat, lon, alt, role=0, hw_model=255):
         """Pull in provided values."""
 
         self.name = name
@@ -269,6 +280,8 @@ class Preset:
         self.lat = lat
         self.lon = lon
         self.alt = alt
+        self.role = role
+        self.hw_model = hw_model
 
     def to_dict(self):
         """Format provided values as a dictionary."""
@@ -286,7 +299,9 @@ class Preset:
             'short_name': self.short_name,
             'lat': self.lat,
             'lon': self.lon,
-            'alt': self.alt
+            'alt': self.alt,
+            'role': self.role,
+            'hw_model': self.hw_model
         }
 
 
@@ -301,7 +316,7 @@ def save_preset():
         return
 
     preset = Preset(name, mqtt_broker_entry.get(), mqtt_username_entry.get(), mqtt_password_entry.get(), root_topic_entry.get(),
-                    channel_entry.get(), key_entry.get(), node_number_entry.get(), long_name_entry.get(), short_name_entry.get(), lat_entry.get(), lon_entry.get(), alt_entry.get())
+                    channel_entry.get(), key_entry.get(), node_number_entry.get(), long_name_entry.get(), short_name_entry.get(), lat_entry.get(), lon_entry.get(), alt_entry.get(), role=ROLE_MAP[role_var.get()], hw_model=int(hw_model_entry.get()))
     presets[name] = preset  # Store the Preset object directly
     update_preset_dropdown()
     preset_var.set(name)
@@ -345,6 +360,9 @@ def load_preset():
         lon_entry.insert(0, selected_preset.lon)
         alt_entry.delete(0, tk.END)
         alt_entry.insert(0, selected_preset.alt)
+        role_var.set(ROLE_NAMES[selected_preset.role])
+        hw_model_entry.delete(0, tk.END)
+        hw_model_entry.insert(0, selected_preset.hw_model)
     else:
         print(f"Error: Preset '{selected_preset_name}' not found.")
 
@@ -771,13 +789,14 @@ def send_node_info(destination_id, want_response):
         decoded_client_id = bytes(node_name, "utf-8")
         decoded_client_long = bytes(long_name_entry.get(), "utf-8")
         decoded_client_short = bytes(short_name_entry.get(), "utf-8")
-        decoded_client_hw_model = client_hw_model
+        decoded_client_hw_model = int(hw_model_entry.get())
 
         user_payload = mesh_pb2.User()
         setattr(user_payload, "id", decoded_client_id)
         setattr(user_payload, "long_name", decoded_client_long)
         setattr(user_payload, "short_name", decoded_client_short)
         setattr(user_payload, "hw_model", decoded_client_hw_model)
+        setattr(user_payload, "role", ROLE_MAP[role_var.get()])
 
         user_payload = user_payload.SerializeToString()
 
@@ -1230,7 +1249,7 @@ def connect_mqtt():
 
     if debug:
         print("connect_mqtt")
-    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, channel, node_number, db_file_path, key
+    global mqtt_broker, mqtt_port, mqtt_username, mqtt_password, root_topic, channel, node_number, db_file_path, key, client
     if not client.is_connected():
         try:
             mqtt_broker = mqtt_broker_entry.get()
@@ -1254,6 +1273,12 @@ def connect_mqtt():
                 return
             
             node_number = int(node_number_entry.get())  # Convert the input to an integer
+
+            connect_mqtt.tls_configured = False
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f'!{format(node_number, "08x")}', clean_session=True, userdata=None)
+            client.on_connect = on_connect
+            client.on_disconnect = on_disconnect
+            client.on_message = on_message
 
             padded_key = key.ljust(len(key) + ((4 - (len(key) % 4)) % 4), '=')
             replaced_key = padded_key.replace('-', '+').replace('_', '/')
@@ -1320,9 +1345,9 @@ def on_connect(client, userdata, flags, reason_code, properties):		# pylint: dis
         if debug:
             print(f"Subscribe Topic is: {subscribe_topic}")
         client.subscribe(subscribe_topic)
-        message = f"{format_time(current_time())} >>> Connected to {mqtt_broker} on topic {channel} as {'!' + hex(node_number)[2:]}"
+        message = f"{format_time(current_time())} >>> Connected to {mqtt_broker} on topic {channel} as {'!' + format(node_number, '08x')}"
         update_gui(message, tag="info")
-        send_node_info(BROADCAST_NUM, want_response=False)
+        #send_node_info(BROADCAST_NUM, want_response=False)
 
         if lon_entry.get() and lon_entry.get():
             send_position(BROADCAST_NUM)
@@ -1438,7 +1463,7 @@ def move_text_down():
     """?"""
 
     text = node_number_entry.get()
-    text = '!{}'.format(hex(int(text))[2:])
+    text = '!{}'.format(format(int(text), '08x'))
 
     if not is_valid_hex(text, 8, 8):
         print ("Not valid Hex")
@@ -1466,7 +1491,7 @@ def send_node_info_periodically() -> None:
     """Function to broadcast NodeInfo in a separate thread."""
     while True:
         if client.is_connected():
-            send_node_info(BROADCAST_NUM, want_response=False)
+            #send_node_info(BROADCAST_NUM, want_response=False)
 
             if lon_entry.get() and lon_entry.get():
                 send_position(BROADCAST_NUM)
@@ -1675,6 +1700,21 @@ alt_entry = tk.Entry(pos_frame, width=8)
 alt_entry.grid(row=0, column=6, padx=5, pady=1, sticky=tk.EW)
 alt_entry.insert(0, alt)
 
+role_label = tk.Label(pos_frame, text="Role:")
+role_label.grid(row=1, column=0, padx=5, pady=1, sticky=tk.EW)
+
+role_var = tk.StringVar(pos_frame)
+role_var.set(ROLE_NAMES[role])
+role_dropdown = tk.OptionMenu(pos_frame, role_var, *ROLE_NAMES)
+role_dropdown.grid(row=1, column=1, padx=5, pady=1, sticky=tk.EW)
+
+hw_model_label = tk.Label(pos_frame, text="HW Model:")
+hw_model_label.grid(row=1, column=3, padx=5, pady=1, sticky=tk.EW)
+
+hw_model_entry = tk.Entry(pos_frame, width=8)
+hw_model_entry.grid(row=1, column=4, padx=5, pady=1, sticky=tk.EW)
+hw_model_entry.insert(0, client_hw_model)
+
 
 ### BUTTONS
 
@@ -1701,8 +1741,11 @@ disconnect_button.grid(row=3, column=2, padx=5, pady=1, sticky=tk.EW)
 node_info_button = tk.Button(button_frame, text="Send NodeInfo", command=lambda: send_node_info(BROADCAST_NUM, want_response=True))
 node_info_button.grid(row=4, column=2, padx=5, pady=1, sticky=tk.EW)
 
+send_position_button = tk.Button(button_frame, text="Send Position", command=lambda: send_position(BROADCAST_NUM))
+send_position_button.grid(row=5, column=2, padx=5, pady=1, sticky=tk.EW)
+
 erase_nodedb_button = tk.Button(button_frame, text="Erase NodeDB", command=erase_nodedb)
-erase_nodedb_button.grid(row=5, column=2, padx=5, pady=1, sticky=tk.EW)
+erase_nodedb_button.grid(row=6, column=2, padx=5, pady=1, sticky=tk.EW)
 
 erase_messagedb_button = tk.Button(button_frame, text="Erase Message History", command=erase_messagedb)
 erase_messagedb_button.grid(row=6, column=2, padx=5, pady=1, sticky=tk.EW)
@@ -1771,10 +1814,7 @@ nodeinfo_window.config(state=tk.DISABLED)
 ############################
 # Main Threads
 
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="", clean_session=True, userdata=None)
-client.on_connect = on_connect
-client.on_disconnect = on_disconnect
-client.on_message = on_message
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, clean_session=True, userdata=None)
 
 mqtt_thread = threading.Thread(target=mqtt_thread, daemon=True)
 mqtt_thread.start()
